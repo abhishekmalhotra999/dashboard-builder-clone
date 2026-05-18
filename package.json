@@ -1,0 +1,15 @@
+{
+  "name": "dashboard-builder-clone",
+  "version": "1.0.0",
+  "description": "A dynamic drag-and-drop dashboard builder inspired by Webflow/Figma. Add, resize, and arrange **Text**, **Image**, and **Chart** widgets on a free-form canvas. Layouts persist to a MySQL database.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
+  }
+}
