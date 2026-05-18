@@ -3,16 +3,47 @@
 // Tests every major feature from the frontend perspective.
 // Run: npx playwright test tests/deep.spec.js
 // ============================================================
-import { test, expect } from '@playwright/test';
+import { test, expect, request } from '@playwright/test';
+
+const API = 'http://localhost:3001';
+
+// Seed a fresh test dashboard with known widgets via API before the suite
+let deepDashboardId;
+
+test.beforeAll(async () => {
+  const ctx = await request.newContext();
+  // Create the test dashboard
+  const res = await ctx.post(`${API}/api/dashboards`, { data: { name: 'Deep Test Dashboard' } });
+  const body = await res.json();
+  deepDashboardId = body.id;
+  // Seed it with a chart + text + image widget
+  await ctx.put(`${API}/api/dashboards/${deepDashboardId}/layout`, {
+    data: {
+      name: 'Deep Test Dashboard',
+      widgets: [
+        { id: 'deep-text-1',  type: 'text',  x: 0, y: 0, w: 5, h: 3, content: { html: '<p>Hello Deep Test</p>' } },
+        { id: 'deep-chart-1', type: 'chart', x: 5, y: 0, w: 6, h: 4, content: { chartType: 'bar', title: 'Deep Chart', theme: 'blue', customData: { labels: ['A','B','C'], values: [10,20,30] } } },
+        { id: 'deep-image-1', type: 'image', x: 0, y: 3, w: 4, h: 4, content: { url: '', alt: 'Test Image', objectFit: 'cover' } },
+      ],
+    },
+  });
+  await ctx.dispose();
+});
+
+test.afterAll(async () => {
+  const ctx = await request.newContext();
+  await ctx.delete(`${API}/api/dashboards/${deepDashboardId}`);
+  await ctx.dispose();
+});
 
 test.describe('Dashboard Builder – Deep E2E', () => {
   test.beforeEach(async ({ page }) => {
-    // Always load the seeded "Analytics Overview" dashboard
-    await page.addInitScript(() => {
-      localStorage.setItem('lastDashboardId', '1');
-    });
+    // Always load our dedicated test dashboard
+    await page.addInitScript((id) => {
+      localStorage.setItem('lastDashboardId', String(id));
+    }, deepDashboardId);
     await page.goto('/');
-    await page.waitForSelector('.widget-wrapper', { timeout: 10000 });
+    await page.waitForSelector('.widget-wrapper', { timeout: 15000 });
   });
 
   // ════════════════════════════════════════════════════════
@@ -422,19 +453,19 @@ test.describe('Dashboard Builder – Deep E2E', () => {
   // ════════════════════════════════════════════════════════
 
   test('39. Unsaved dot absent on page load, appears after widget add', async ({ page }) => {
-    await expect(page.locator('.unsaved-dot')).not.toBeVisible();
+    await expect(page.locator('.autosave-pending')).not.toBeVisible();
     await page.locator('.sidebar-item').filter({ hasText: 'Heading' }).click();
     await page.waitForTimeout(300);
-    await expect(page.locator('.unsaved-dot')).toBeVisible();
+    await expect(page.locator('.autosave-pending')).toBeVisible();
   });
 
   test('40. Unsaved dot disappears after Save', async ({ page }) => {
     await page.locator('.sidebar-item').filter({ hasText: 'Heading' }).click();
     await page.waitForTimeout(300);
-    await expect(page.locator('.unsaved-dot')).toBeVisible();
+    await expect(page.locator('.autosave-pending')).toBeVisible();
     await page.locator('.btn-primary').click();
     await page.waitForTimeout(2000);
-    await expect(page.locator('.unsaved-dot')).not.toBeVisible();
+    await expect(page.locator('.autosave-pending')).not.toBeVisible();
   });
 
   test('41. Save button fires PUT /api/dashboards/:id/layout', async ({ page }) => {
@@ -487,9 +518,9 @@ test.describe('Dashboard Builder – Deep E2E', () => {
     await page.keyboard.press('Enter');
     await page.waitForTimeout(300);
     await expect(page.locator('.topbar-name')).toContainText('My Renamed Dashboard');
-    // Reset
+    // Reset to original name
     await page.locator('.topbar-name').click();
-    await page.locator('.topbar-name-input').fill('Analytics Overview');
+    await page.locator('.topbar-name-input').fill('Deep Test Dashboard');
     await page.keyboard.press('Enter');
     await page.locator('.btn-primary').click();
     await page.waitForTimeout(1500);
@@ -497,33 +528,53 @@ test.describe('Dashboard Builder – Deep E2E', () => {
 
   test('45. + New dashboard: POST fires, canvas is empty, layers is empty', async ({ page }) => {
     let postFired = false;
-    page.on('request', r => {
-      if (r.method() === 'POST' && r.url().includes('/api/dashboards')) postFired = true;
+    let newId = null;
+    page.on('response', async r => {
+      if (r.request().method() === 'POST' && r.url().includes('/api/dashboards')) {
+        postFired = true;
+        try { const b = await r.json(); newId = b.id; } catch {}
+      }
     });
     await page.locator('.btn-secondary').click();
     await page.waitForTimeout(2500);
     expect(postFired).toBe(true);
     await expect(page.locator('.canvas-empty')).toBeVisible();
     await expect(page.locator('.layers-empty')).toBeVisible();
+    // Clean up the extra dashboard
+    if (newId) await page.request.delete(`${API}/api/dashboards/${newId}`);
   });
 
   test('46. Delete dashboard: dialog message contains "Delete"', async ({ page }) => {
     // Create a temp dashboard to delete
+    let tempId = null;
+    page.on('response', async r => {
+      if (r.request().method() === 'POST' && r.url().includes('/api/dashboards')) {
+        try { const b = await r.json(); tempId = b.id; } catch {}
+      }
+    });
     await page.locator('.btn-secondary').click();
     await page.waitForTimeout(2000);
 
     let dialogMessage = '';
     page.once('dialog', async dialog => {
       dialogMessage = dialog.message();
-      await dialog.dismiss();
+      await dialog.dismiss(); // dismiss — don't actually delete
     });
     await page.locator('.btn-danger-ghost').click();
     await page.waitForTimeout(500);
     expect(dialogMessage).toContain('Delete');
+    // Clean up the temp dashboard we created
+    if (tempId) await page.request.delete(`${API}/api/dashboards/${tempId}`);
   });
 
   test('47. Delete dashboard: accepting dialog navigates to another dashboard', async ({ page }) => {
-    // Create a temp dashboard
+    // Create a temp dashboard to delete
+    let tempId = null;
+    page.on('response', async r => {
+      if (r.request().method() === 'POST' && r.url().includes('/api/dashboards')) {
+        try { const b = await r.json(); tempId = b.id; } catch {}
+      }
+    });
     await page.locator('.btn-secondary').click();
     await page.waitForTimeout(2000);
     const nameBefore = (await page.locator('.topbar-name').textContent()).replace('✎', '').trim();
@@ -654,8 +705,8 @@ test.describe('Dashboard Builder – Deep E2E', () => {
     expect(data.length).toBeGreaterThanOrEqual(1);
   });
 
-  test('57. API GET /api/dashboards/1 returns dashboard with widgets array', async ({ page }) => {
-    const response = await page.request.get('http://localhost:3001/api/dashboards/1');
+  test('57. API GET /api/dashboards/:id returns dashboard with widgets array', async ({ page }) => {
+    const response = await page.request.get(`${API}/api/dashboards/${deepDashboardId}`);
     expect(response.status()).toBe(200);
     const data = await response.json();
     expect(data).toHaveProperty('dashboard');

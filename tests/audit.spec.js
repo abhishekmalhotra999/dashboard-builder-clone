@@ -1,17 +1,53 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, request } from '@playwright/test';
 
 const BASE = 'http://localhost:5173';
-const SEED_DASHBOARD_ID = 1; // 'Analytics Overview' seeded in DB
+const API  = 'http://localhost:3001';
+
+let testDashboardId;
+
+// Create a fresh test dashboard before the suite and clean it up after
+test.beforeAll(async () => {
+  const ctx = await request.newContext();
+  const res = await ctx.post(`${API}/api/dashboards`, { data: { name: 'Audit Test Dashboard' } });
+  const body = await res.json();
+  testDashboardId = body.id;
+  // Seed with initial widgets so tests that need existing widgets work
+  await ctx.put(`${API}/api/dashboards/${testDashboardId}/layout`, {
+    data: {
+      name: 'Audit Test Dashboard',
+      widgets: [
+        {
+          id: 'audit-chart-1', type: 'chart', x: 0, y: 0, w: 6, h: 4,
+          content: { chartType: 'bar', title: 'Audit Chart', theme: 'blue', customData: { labels: ['A','B','C'], values: [10,20,30] } },
+        },
+        {
+          id: 'audit-text-1', type: 'text', x: 6, y: 0, w: 5, h: 3,
+          content: { html: '<p>Audit text widget</p>' },
+        },
+        {
+          id: 'audit-image-1', type: 'image', x: 0, y: 4, w: 4, h: 4,
+          content: { url: '', alt: 'Audit image', objectFit: 'cover' },
+        },
+      ],
+    },
+  });
+  await ctx.dispose();
+});
+
+test.afterAll(async () => {
+  const ctx = await request.newContext();
+  await ctx.delete(`${API}/api/dashboards/${testDashboardId}`);
+  await ctx.dispose();
+});
 
 test.describe('Dashboard Builder – Audit', () => {
   test.beforeEach(async ({ page }) => {
-    // Always start on the seeded 'Analytics Overview' dashboard
+    // Always start on our dedicated test dashboard
     await page.addInitScript((id) => {
       localStorage.setItem('lastDashboardId', String(id));
-    }, SEED_DASHBOARD_ID);
+    }, testDashboardId);
     await page.goto(BASE, { waitUntil: 'networkidle' });
     await page.waitForSelector('.topbar', { timeout: 15000 });
-    // Wait until dashboard has loaded (name no longer says "Untitled")
     await page.waitForFunction(
       () => document.querySelector('.topbar-name')?.textContent?.trim().length > 1,
       { timeout: 10000 }
@@ -26,11 +62,13 @@ test.describe('Dashboard Builder – Audit', () => {
     console.log('✅ 3-panel layout present');
   });
 
-  test('2. Sample data loads from DB (widgets on canvas)', async ({ page }) => {
-    const widgets = page.locator('.widget-wrapper');
-    const count = await widgets.count();
+  test('2. Seeded widgets load from DB (widgets on canvas)', async ({ page }) => {
+    // The dashboard was seeded with 3 widgets (chart, text, image)
+    await page.waitForSelector('.widget-wrapper', { timeout: 10000 });
+    const count = await page.locator('.widget-wrapper').count();
     console.log(`Widget count from DB: ${count}`);
-    expect(count).toBeGreaterThan(0);
+    expect(count).toBeGreaterThanOrEqual(3);
+    console.log('✅ Seeded widgets loaded from DB');
   });
 
   test('3. Dashboard name shows and is editable', async ({ page }) => {
@@ -145,21 +183,21 @@ test.describe('Dashboard Builder – Audit', () => {
   });
 
   test('11. New dashboard button creates new dashboard', async ({ page }) => {
-    let created = false;
-    page.on('request', req => {
-      if (req.method() === 'POST' && req.url().includes('/api/dashboards')) {
-        created = true;
+    let createdId = null;
+    page.on('response', async res => {
+      if (res.request().method() === 'POST' && res.url().includes('/api/dashboards')) {
+        try { const body = await res.json(); createdId = body.id; } catch {}
       }
     });
     await page.locator('.btn-secondary', { hasText: '+ New' }).click();
-    await page.waitForTimeout(1500);
-    if (created) {
-      console.log('✅ New dashboard POST request fired');
+    await page.waitForTimeout(2000);
+    if (createdId) {
+      console.log(`✅ New dashboard POST request fired — got ID ${createdId}`);
+      // Clean up the extra dashboard via API
+      await page.request.delete(`${API}/api/dashboards/${createdId}`);
     } else {
       console.log('❌ New dashboard button did NOT fire POST request');
     }
-    // Navigate back to seed dashboard so this test doesn't pollute others
-    await page.evaluate((id) => localStorage.setItem('lastDashboardId', String(id)), SEED_DASHBOARD_ID);
   });
 
   test('12. Widget delete button removes widget', async ({ page }) => {
@@ -179,16 +217,23 @@ test.describe('Dashboard Builder – Audit', () => {
   });
 
   test('13. Reload – layout restores from DB', async ({ page }) => {
-    // Ensure we're on the seeded dashboard with widgets
-    await page.waitForSelector('.widget-wrapper', { timeout: 8000 });
+    // Add a widget to have something to persist
+    await page.locator('.sidebar-item', { hasText: 'Heading' }).click();
+    await page.waitForTimeout(400);
     const beforeCount = await page.locator('.widget-wrapper').count();
-    console.log(`Widgets before reload: ${beforeCount}`);
+    console.log(`Widgets before save+reload: ${beforeCount}`);
     expect(beforeCount).toBeGreaterThan(0);
 
     // Save then reload
     await page.locator('.btn-primary', { hasText: /Save/ }).click();
     await page.waitForTimeout(1500);
     await page.reload({ waitUntil: 'networkidle' });
+    // Wait for the dashboard to fully load
+    await page.waitForSelector('.topbar', { timeout: 10000 });
+    await page.waitForFunction(
+      () => document.querySelector('.topbar-name')?.textContent?.trim().length > 1,
+      { timeout: 8000 }
+    );
     await page.waitForSelector('.widget-wrapper', { timeout: 10000 });
 
     const afterCount = await page.locator('.widget-wrapper').count();
